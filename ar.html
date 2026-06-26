@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>fotokita blurrr</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    video {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      transition: filter 0.15s ease;
+    }
+
+    video.blurred {
+      filter: blur(8px) brightness(0.9);
+    }
+
+    canvas { display: none; }
+
+    /* Loading */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 99;
+      transition: opacity 0.5s ease;
+    }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid #222;
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error */
+    #error-msg {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #000;
+      color: #fff;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 100;
+      text-align: center;
+      padding: 24px;
+      font-family: sans-serif;
+    }
+    #error-msg.show { display: flex; }
+    #error-msg p { color: #888; font-size: 0.85rem; max-width: 260px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div></div>
+
+<div id="error-msg">
+  <h2 style="font-size:1rem;font-family:sans-serif">Kamera tidak dapat diakses</h2>
+  <p>Izinkan akses kamera di browser, lalu muat ulang halaman.</p>
+</div>
+
+<video id="video" autoplay muted playsinline></video>
+<canvas id="canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+  const video   = document.getElementById('video');
+  const loadEl  = document.getElementById('loading');
+  const errorEl = document.getElementById('error-msg');
+
+  let isBlurred = false;
+
+  function setBlur(active) {
+    if (active === isBlurred) return;
+    isBlurred = active;
+    video.classList.toggle('blurred', active);
+  }
+
+  function fingerUp(tip, pip, lm) {
+    return lm[tip].y < lm[pip].y;
+  }
+
+  function isPeace(lm) {
+    const indexUp   = fingerUp(8,  6,  lm);
+    const middleUp  = fingerUp(12, 10, lm);
+    const ringDown  = !fingerUp(16, 14, lm);
+    const pinkyDown = !fingerUp(20, 18, lm);
+    // relax thumb check so it works from far away
+    const thumbFolded = Math.abs(lm[4].x - lm[3].x) < 0.15;
+    return indexUp && middleUp && ringDown && pinkyDown && thumbFolded;
+  }
+
+  (async () => {
+    const hands = new Hands({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0,
+      minDetectionConfidence: 0.4,
+      minTrackingConfidence: 0.3,
+    });
+
+    hands.onResults(results => {
+      let peace = false;
+      if (results.multiHandLandmarks?.length) {
+        for (const lm of results.multiHandLandmarks) {
+          if (isPeace(lm)) { peace = true; break; }
+        }
+      }
+      setBlur(peace);
+    });
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+          facingMode: 'user',
+          frameRate: { ideal: 30 }
+        },
+        audio: false,
+      });
+
+      video.srcObject = stream;
+      await video.play();
+
+      const camera = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 1920,
+        height: 1080,
+      });
+
+      await camera.start();
+      setTimeout(() => loadEl.classList.add('hidden'), 600);
+
+    } catch (err) {
+      console.error(err);
+      loadEl.classList.add('hidden');
+      errorEl.classList.add('show');
+    }
+  })();
+</script>
+</body>
+</html>
