@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -13,154 +14,146 @@
       width:100%; height:100%;
       object-fit:cover;
       transform:scaleX(-1);
-      transition:filter 0.12s ease;
+      transition:filter 0.15s ease;
     }
-    video.blurred { filter:blur(8px) brightness(0.88); }
+    video.blurred { filter:blur(10px) brightness(0.85); }
 
     canvas { display:none; }
 
     #loading {
       position:fixed; inset:0; background:#000;
-      display:flex; align-items:center; justify-content:center;
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center; gap:14px;
       z-index:99; transition:opacity 0.4s ease;
     }
     #loading.hidden { opacity:0; pointer-events:none; }
     .spinner {
       width:38px; height:38px;
-      border:3px solid #333; border-top-color:#fff;
+      border:3px solid #222; border-top-color:#fff;
       border-radius:50%; animation:spin 0.75s linear infinite;
     }
     @keyframes spin { to { transform:rotate(360deg); } }
+    #load-text {
+      color:#555; font-family:sans-serif;
+      font-size:12px; letter-spacing:.5px;
+    }
 
     #err {
       display:none; position:fixed; inset:0; background:#000; color:#fff;
       align-items:center; justify-content:center; flex-direction:column;
-      gap:10px; z-index:100; text-align:center; padding:24px; font-family:sans-serif;
+      gap:12px; z-index:100; text-align:center; padding:24px; font-family:sans-serif;
     }
     #err.show { display:flex; }
-    #err p { color:#777; font-size:.83rem; max-width:260px; line-height:1.6; }
+    #err h2 { font-size:1rem; }
+    #err p { color:#555; font-size:.82rem; max-width:280px; line-height:1.7; }
   </style>
 </head>
 <body>
 
-<div id="loading"><div class="spinner"></div></div>
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="load-text">Memulai kamera...</div>
+</div>
+
 <div id="err">
-  <h2 style="font-size:1rem;font-family:sans-serif">Kamera tidak dapat diakses</h2>
+  <h2>Kamera tidak dapat diakses</h2>
   <p>Izinkan akses kamera di browser, lalu muat ulang halaman.</p>
 </div>
 
 <video id="video" autoplay muted playsinline></video>
 <canvas id="canvas"></canvas>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script type="module">
+// Gunakan MediaPipe Tasks Vision — paling stabil di mobile & GitHub Pages
+import { GestureRecognizer, FilesetResolver }
+  from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js';
 
-<script>
-  const video  = document.getElementById('video');
-  const canvas = document.getElementById('canvas');
-  const ctx    = canvas.getContext('2d');
-  const loadEl = document.getElementById('loading');
-  const errEl  = document.getElementById('err');
+const video  = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const loadEl = document.getElementById('loading');
+const loadTx = document.getElementById('load-text');
+const errEl  = document.getElementById('err');
 
-  let isBlurred  = false;
-  let busy       = false;
+let recognizer = null;
+let isBlurred  = false;
+let lastTs     = -1;
 
-  function setBlur(v) {
-    if (v === isBlurred) return;
-    isBlurred = v;
-    video.classList.toggle('blurred', v);
-  }
+function setBlur(v) {
+  if (v === isBlurred) return;
+  isBlurred = v;
+  video.classList.toggle('blurred', v);
+}
 
-  /* ---------- Deteksi ✌️ Peace / Victory ----------
-   *
-   * Strategi: bandingkan posisi TIP jari vs MCP (pangkal jari).
-   * Ini lebih stabil dari pip karena jarak lebih jauh → lebih tahan noise.
-   *
-   * Landmark index:
-   *   Ibu jari  : 1(cmc) 2(mcp) 3(ip)  4(tip)
-   *   Telunjuk  : 5(mcp) 6(pip) 7(dip) 8(tip)
-   *   Jari tgh  : 9(mcp) 10(pip)11(dip)12(tip)
-   *   Jari manis:13(mcp) 14(pip)15(dip)16(tip)
-   *   Kelingking:17(mcp) 18(pip)19(dip)20(tip)
-   */
-  function dist(a, b) {
-    const dx = a.x - b.x, dy = a.y - b.y;
-    return Math.sqrt(dx*dx + dy*dy);
-  }
+// ── STEP 1: Kamera duluan ──────────────────────────────────
+try {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      width:      { ideal: 1280 },
+      height:     { ideal: 720 },
+      facingMode: 'user',
+      frameRate:  { ideal: 30 }
+    },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+  await new Promise(r => video.addEventListener('loadedmetadata', r, { once: true }));
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+} catch(e) {
+  console.error(e);
+  loadEl.classList.add('hidden');
+  errEl.classList.add('show');
+  throw e;
+}
 
-  function isPeace(lm) {
-    // Ukuran referensi: panjang telapak (wrist ke tengah-MCP)
-    const palmSize = dist(lm[0], lm[9]);
-    if (palmSize < 0.01) return false; // tangan terlalu kecil / jauh
+// ── STEP 2: Load model di background ──────────────────────
+loadTx.textContent = 'Memuat model...';
 
-    // Jari "tegak" = tip-y jauh lebih tinggi dari mcp-y
-    // threshold relatif terhadap ukuran telapak agar konsisten dari jauh
-    const threshold = palmSize * 0.3;
+const vision = await FilesetResolver.forVisionTasks(
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
+);
 
-    const indexUp   = (lm[5].y - lm[8].y)  > threshold;   // tip lebih tinggi dari mcp
-    const middleUp  = (lm[9].y - lm[12].y)  > threshold;
-    const ringDown  = (lm[16].y - lm[13].y) > -threshold * 0.3; // tip TIDAK lebih tinggi
-    const pinkyDown = (lm[20].y - lm[17].y) > -threshold * 0.3;
+recognizer = await GestureRecognizer.createFromOptions(vision, {
+  baseOptions: {
+    modelAssetPath:
+      'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+    delegate: 'GPU'
+  },
+  runningMode:        'VIDEO',
+  numHands:           2,
+  minHandDetectionConfidence: 0.4,
+  minHandPresenceConfidence:  0.4,
+  minTrackingConfidence:      0.4,
+});
 
-    return indexUp && middleUp && ringDown && pinkyDown;
-  }
+loadEl.classList.add('hidden');
 
-  (async () => {
-    const hands = new Hands({
-      locateFile: f =>
-        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
-    });
+// ── STEP 3: Deteksi gesture per frame ─────────────────────
+// MediaPipe GestureRecognizer mengenali "Victory" = ✌️ secara langsung
+// Tidak perlu hitung landmark manual lagi!
+function loop(ts) {
+  if (recognizer && video.readyState >= 2 && ts !== lastTs) {
+    lastTs = ts;
+    const result = recognizer.recognizeForVideo(video, ts);
 
-    hands.setOptions({
-      maxNumHands:            2,
-      modelComplexity:        0,
-      minDetectionConfidence: 0.35,
-      minTrackingConfidence:  0.25,
-    });
-
-    hands.onResults(results => {
-      busy = false;
-      if (!results.multiHandLandmarks?.length) { setBlur(false); return; }
-      let peace = false;
-      for (const lm of results.multiHandLandmarks) {
-        if (isPeace(lm)) { peace = true; break; }
-      }
-      setBlur(peace);
-    });
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width:{ideal:1920}, height:{ideal:1080},
-                 facingMode:'user', frameRate:{ideal:30} },
-        audio: false
-      });
-
-      video.srcObject = stream;
-      await video.play();
-
-      video.addEventListener('loadedmetadata', () => {
-        canvas.width  = video.videoWidth  || 1280;
-        canvas.height = video.videoHeight || 720;
-      });
-
-      await hands.initialize();
-      loadEl.classList.add('hidden');
-
-      function loop() {
-        if (!busy && video.readyState >= 2 && canvas.width > 0) {
-          busy = true;
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          hands.send({ image: canvas }).catch(() => { busy = false; });
+    let peace = false;
+    if (result.gestures?.length) {
+      for (const gestureList of result.gestures) {
+        // gestureList[0].categoryName bisa: "Victory", "Thumb_Up", dll
+        if (gestureList[0]?.categoryName === 'Victory') {
+          peace = true;
+          break;
         }
-        requestAnimationFrame(loop);
       }
-      loop();
-
-    } catch (e) {
-      console.error(e);
-      loadEl.classList.add('hidden');
-      errEl.classList.add('show');
     }
-  })();
+    setBlur(peace);
+  }
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
