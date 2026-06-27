@@ -1,159 +1,171 @@
-
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>fotokita blurrr</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>fotokuta blurrr</title>
   <style>
-    *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
-    html, body { width:100%; height:100%; background:#000; overflow:hidden; }
-
-    video {
-      position:fixed; top:0; left:0;
-      width:100%; height:100%;
-      object-fit:cover;
-      transform:scaleX(-1);
-      transition:filter 0.15s ease;
-    }
-    video.blurred { filter:blur(10px) brightness(0.85); }
-
-    canvas { display:none; }
-
-    #loading {
-      position:fixed; inset:0; background:#000;
-      display:flex; flex-direction:column;
-      align-items:center; justify-content:center; gap:14px;
-      z-index:99; transition:opacity 0.4s ease;
-    }
-    #loading.hidden { opacity:0; pointer-events:none; }
-    .spinner {
-      width:38px; height:38px;
-      border:3px solid #222; border-top-color:#fff;
-      border-radius:50%; animation:spin 0.75s linear infinite;
-    }
-    @keyframes spin { to { transform:rotate(360deg); } }
-    #load-text {
-      color:#555; font-family:sans-serif;
-      font-size:12px; letter-spacing:.5px;
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
     }
 
-    #err {
-      display:none; position:fixed; inset:0; background:#000; color:#fff;
-      align-items:center; justify-content:center; flex-direction:column;
-      gap:12px; z-index:100; text-align:center; padding:24px; font-family:sans-serif;
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
     }
-    #err.show { display:flex; }
-    #err h2 { font-size:1rem; }
-    #err p { color:#555; font-size:.82rem; max-width:280px; line-height:1.7; }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      transition: filter 0.2s ease;
+    }
+
+#start-btn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 10px 24px;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-weight: 500;
+      background: rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.9);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 20px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: background 0.2s, border-color 0.2s;
+      z-index: 10;
+      white-space: nowrap;
+    }
+
+    #start-btn:hover {
+      background: rgba(255,255,255,0.15);
+      border-color: rgba(255,255,255,0.35);
+    }
   </style>
 </head>
 <body>
+  <div id="container">
+    <video id="video" autoplay muted playsinline></video>
+<button id="start-btn">Tap to Start Camera</button>
+  </div>
 
-<div id="loading">
-  <div class="spinner"></div>
-  <div id="load-text">Memulai kamera...</div>
-</div>
+  <!-- MediaPipe CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 
-<div id="err">
-  <h2>Kamera tidak dapat diakses</h2>
-  <p>Izinkan akses kamera di browser, lalu muat ulang halaman.</p>
-</div>
+  <script>
+    const video = document.getElementById('video');
+    const btn   = document.getElementById('start-btn');
 
-<video id="video" autoplay muted playsinline></video>
-<canvas id="canvas"></canvas>
+    // ── Gesture detection ──────────────────────────────────────────
+    // Landmark indices
+    const TIP  = [4, 8, 12, 16, 20];
+    const PIP  = [3, 7, 11, 15, 19]; // one joint below tip for fingers 1-4
+    const MCP  = [2, 5, 9, 13, 17];  // knuckle
 
-<script type="module">
-// Gunakan MediaPipe Tasks Vision — paling stabil di mobile & GitHub Pages
-import { GestureRecognizer, FilesetResolver }
-  from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js';
+    function isFingerUp(lm, fingerIndex) {
+      // fingerIndex: 0=thumb(skip), 1=index, 2=middle, 3=ring, 4=pinky
+      // Compare tip.y < pip.y (y axis: 0=top, 1=bottom in MediaPipe)
+      const tip = lm[TIP[fingerIndex]];
+      const pip = lm[PIP[fingerIndex]];
+      return tip.y < pip.y;
+    }
 
-const video  = document.getElementById('video');
-const canvas = document.getElementById('canvas');
-const ctx    = canvas.getContext('2d');
-const loadEl = document.getElementById('loading');
-const loadTx = document.getElementById('load-text');
-const errEl  = document.getElementById('err');
+    function isFingerDown(lm, fingerIndex) {
+      const tip = lm[TIP[fingerIndex]];
+      const mcp = lm[MCP[fingerIndex]];
+      return tip.y > mcp.y;
+    }
 
-let recognizer = null;
-let isBlurred  = false;
-let lastTs     = -1;
+    function isPeaceSign(lm) {
+      const indexUp  = isFingerUp(lm, 1);
+      const middleUp = isFingerUp(lm, 2);
+      const ringDown = isFingerDown(lm, 3);
+      const pinkyDown= isFingerDown(lm, 4);
+      return indexUp && middleUp && ringDown && pinkyDown;
+    }
 
-function setBlur(v) {
-  if (v === isBlurred) return;
-  isBlurred = v;
-  video.classList.toggle('blurred', v);
-}
+    // ── MediaPipe Hands ────────────────────────────────────────────
+    let blurActive = false;
 
-// ── STEP 1: Kamera duluan ──────────────────────────────────
-try {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width:      { ideal: 1280 },
-      height:     { ideal: 720 },
-      facingMode: 'user',
-      frameRate:  { ideal: 30 }
-    },
-    audio: false
-  });
-  video.srcObject = stream;
-  await video.play();
-  await new Promise(r => video.addEventListener('loadedmetadata', r, { once: true }));
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
-} catch(e) {
-  console.error(e);
-  loadEl.classList.add('hidden');
-  errEl.classList.add('show');
-  throw e;
-}
+    function onResults(results) {
+      let peace = false;
 
-// ── STEP 2: Load model di background ──────────────────────
-loadTx.textContent = 'Memuat model...';
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        results.multiHandLandmarks.forEach((landmarks) => {
+          if (isPeaceSign(landmarks)) peace = true;
+        });
+      }
 
-const vision = await FilesetResolver.forVisionTasks(
-  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
-);
-
-recognizer = await GestureRecognizer.createFromOptions(vision, {
-  baseOptions: {
-    modelAssetPath:
-      'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
-    delegate: 'GPU'
-  },
-  runningMode:        'VIDEO',
-  numHands:           2,
-  minHandDetectionConfidence: 0.4,
-  minHandPresenceConfidence:  0.4,
-  minTrackingConfidence:      0.4,
-});
-
-loadEl.classList.add('hidden');
-
-// ── STEP 3: Deteksi gesture per frame ─────────────────────
-// MediaPipe GestureRecognizer mengenali "Victory" = ✌️ secara langsung
-// Tidak perlu hitung landmark manual lagi!
-function loop(ts) {
-  if (recognizer && video.readyState >= 2 && ts !== lastTs) {
-    lastTs = ts;
-    const result = recognizer.recognizeForVideo(video, ts);
-
-    let peace = false;
-    if (result.gestures?.length) {
-      for (const gestureList of result.gestures) {
-        // gestureList[0].categoryName bisa: "Victory", "Thumb_Up", dll
-        if (gestureList[0]?.categoryName === 'Victory') {
-          peace = true;
-          break;
-        }
+      // Apply or remove blur
+      if (peace !== blurActive) {
+        blurActive = peace;
+        video.style.filter = blurActive ? 'blur(8px)' : 'blur(0px)';
       }
     }
-    setBlur(peace);
-  }
-  requestAnimationFrame(loop);
-}
 
-requestAnimationFrame(loop);
-</script>
+    const hands = new Hands({
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults(onResults);
+
+    // ── Camera start ───────────────────────────────────────────────
+    let camera = null;
+
+    btn.addEventListener('click', () => {
+      btn.style.display = 'none';
+
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+      })
+      .then((stream) => {
+        video.srcObject = stream;
+        video.play();
+
+        camera = new Camera(video, {
+          onFrame: async () => {
+            await hands.send({ image: video });
+          },
+          width: 1280,
+          height: 720
+        });
+        camera.start();
+      })
+      .catch((err) => {
+        btn.style.display = 'block';
+        btn.textContent = 'Camera access denied. Try again.';
+        console.error(err);
+      });
+    });
+  </script>
 </body>
 </html>
