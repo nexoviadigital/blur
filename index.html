@@ -28,7 +28,6 @@
 
     canvas { display: none; }
 
-    /* Loading */
     #loading {
       position: fixed;
       inset: 0;
@@ -43,14 +42,13 @@
 
     .spinner {
       width: 40px; height: 40px;
-      border: 3px solid #222;
+      border: 3px solid #333;
       border-top-color: #fff;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Error */
     #error-msg {
       display: none;
       position: fixed;
@@ -76,21 +74,24 @@
 
 <div id="error-msg">
   <h2 style="font-size:1rem;font-family:sans-serif">kamera tidak dapat diakses</h2>
-  <p>izinkan akses kameranya dulu di browser, lalu muat ulang halaman.</p>
+  <p>izinkan akses kameranya di browser, lalu muat ulang halaman.</p>
 </div>
 
 <video id="video" autoplay muted playsinline></video>
+<!-- canvas hanya untuk copy frame ke mediapipe -->
 <canvas id="canvas"></canvas>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
 
 <script>
   const video   = document.getElementById('video');
+  const canvas  = document.getElementById('canvas');
+  const ctx     = canvas.getContext('2d');
   const loadEl  = document.getElementById('loading');
   const errorEl = document.getElementById('error-msg');
 
   let isBlurred = false;
+  let processing = false; // lock agar tidak tumpuk
 
   function setBlur(active) {
     if (active === isBlurred) return;
@@ -107,14 +108,15 @@
     const middleUp  = fingerUp(12, 10, lm);
     const ringDown  = !fingerUp(16, 14, lm);
     const pinkyDown = !fingerUp(20, 18, lm);
-    // relax thumb check so it works from far away
     const thumbFolded = Math.abs(lm[4].x - lm[3].x) < 0.15;
     return indexUp && middleUp && ringDown && pinkyDown && thumbFolded;
   }
 
   (async () => {
+    // 1. Init MediaPipe Hands
     const hands = new Hands({
-      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
+      locateFile: f =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`
     });
 
     hands.setOptions({
@@ -125,6 +127,7 @@
     });
 
     hands.onResults(results => {
+      processing = false; // selesai, boleh kirim frame berikutnya
       let peace = false;
       if (results.multiHandLandmarks?.length) {
         for (const lm of results.multiHandLandmarks) {
@@ -134,6 +137,7 @@
       setBlur(peace);
     });
 
+    // 2. Akses kamera
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -148,14 +152,30 @@
       video.srcObject = stream;
       await video.play();
 
-      const camera = new Camera(video, {
-        onFrame: async () => { await hands.send({ image: video }); },
-        width: 1920,
-        height: 1080,
+      // Sesuaikan ukuran canvas dengan video asli
+      video.addEventListener('loadedmetadata', () => {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
       });
 
-      await camera.start();
-      setTimeout(() => loadEl.classList.add('hidden'), 600);
+      // 3. Loop manual pakai RAF — bekerja di semua env termasuk GitHub Pages
+      async function loop() {
+        if (!processing && video.readyState >= 2) {
+          processing = true;
+          // Gambar frame video ke canvas lalu kirim ke mediapipe
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          await hands.send({ image: canvas });
+        }
+        requestAnimationFrame(loop);
+      }
+
+      // Warmup model dulu sebelum mulai loop
+      await hands.initialize();
+
+      setTimeout(() => {
+        loadEl.classList.add('hidden');
+        loop();
+      }, 500);
 
     } catch (err) {
       console.error(err);
